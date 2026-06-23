@@ -13,7 +13,6 @@ use ort::{
     session::{builder::GraphOptimizationLevel, Session},
     value::Tensor as OrtTensor,
 };
-use rfd::FileDialog;
 use walkdir::WalkDir;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tiff", "tif", "webp"];
@@ -79,6 +78,28 @@ fn default_threshold() -> f32 {
         .unwrap_or(0.6)
 }
 
+/// Resolve the image folder: use the CLI argument if given, otherwise open a GUI folder
+/// picker. The picker (rfd) is compiled only on non-Linux targets (Windows/macOS), where
+/// the app is typically launched by double-click; on Linux the folder must be passed as an
+/// argument, which keeps GTK/Wayland system libraries out of the Linux build.
+#[cfg(not(target_os = "linux"))]
+fn resolve_input_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
+    match arg {
+        Some(p) => Ok(p),
+        None => rfd::FileDialog::new()
+            .set_title("Select image directory")
+            .pick_folder()
+            .context("No directory selected"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_input_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
+    arg.context(
+        "No input folder given. On Linux, pass the image folder as an argument, e.g.:  localSort /path/to/images",
+    )
+}
+
 fn main() {
     let cli = Cli::parse();
     // Launched without a folder argument (e.g. double-clicked) -> we open a GUI picker and
@@ -112,15 +133,7 @@ fn run(cli: Cli) -> Result<()> {
     // Build-time default, overridable at runtime with --min-confidence.
     let threshold = cli.min_confidence.unwrap_or_else(default_threshold);
 
-    let input = cli
-        .input
-        .clone()
-        .or_else(|| {
-            FileDialog::new()
-                .set_title("Select image directory")
-                .pick_folder()
-        })
-        .context("No directory selected")?;
+    let input = resolve_input_dir(cli.input.clone())?;
     anyhow::ensure!(input.is_dir(), "Not a directory: {}", input.display());
 
     let model_path = match &cli.model {

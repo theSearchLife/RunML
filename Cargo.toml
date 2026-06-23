@@ -9,5 +9,10 @@ clap = { version = "4", features = ["derive"] }
 image = "0.25"
 ndarray = "0.17"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
-rfd = "0.15"
 walkdir = "2"
+
+# GUI folder picker — only on platforms where the app is launched by double-click.
+# Excluded on Linux so the build needs no GTK/Wayland system libraries (on Linux the
+# image folder is passed as a CLI argument instead).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = "0.15"
