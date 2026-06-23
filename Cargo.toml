@@ -1,0 +1,13 @@
+[package]
+name = "localSort"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+ndarray = "0.17"
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
+rfd = "0.15"
+walkdir = "2"

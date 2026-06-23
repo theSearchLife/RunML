@@ -1,0 +1,12 @@
+/target
+*.exe
+
+# Large test data and model artifacts live outside the repo / in releases.
+/data/
+/test/
+*.onnx
+*.pt
+
+# Editor / local agent state
+.idea/
+.claude/
