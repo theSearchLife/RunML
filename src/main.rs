@@ -15,11 +15,15 @@ use ort::{
 };
 use walkdir::WalkDir;
 
+mod remote;
+
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tiff", "tif", "webp"];
 // Used only if the model's ONNX metadata is missing `names` (ultralytics always embeds it).
 const FALLBACK_CLASSES: &[&str] = &["manta", "non_fish", "other_fish"];
 const FALLBACK_IMGSZ: u32 = 640;
 const UNSURE_DIR: &str = "unsure";
+// This tool's own repo — checked for newer releases to self-update.
+const TOOL_REPO: &str = "theSearchLife/RunML";
 
 /// Sort a folder of images into per-class sub-folders using a YOLO classification model (ONNX).
 ///
@@ -27,15 +31,17 @@ const UNSURE_DIR: &str = "unsure";
 /// ONNX metadata, so the same tool works for any ultralytics classification model
 /// (2-class, 3-class, ...) without recompiling.
 #[derive(Parser, Debug)]
-#[command(name = "localSort", version, about)]
+#[command(name = "ml-runner", version, about)]
 struct Cli {
-    /// Folder of images to sort. If omitted, a folder picker opens.
+    /// Folder of images to sort. Defaults to the current directory.
+    #[arg(value_name = "IMAGES_DIR")]
     input: Option<PathBuf>,
 
-    /// Path to the ONNX model. If omitted, looks for `model.onnx` (then any single
-    /// `*.onnx`) next to the images, in the working dir, and next to the executable.
-    #[arg(long, value_name = "FILE")]
-    model: Option<PathBuf>,
+    /// Model source: a GitHub repo `Org/Repo` whose latest release holds `model.onnx`
+    /// (downloaded and cached), or a path to a local `.onnx` file. If omitted, looks for
+    /// `model.onnx` next to the images, in the working dir, and next to the executable.
+    #[arg(long, value_name = "REPO|FILE")]
+    model: Option<String>,
 
     /// Classify and report counts without moving or copying anything.
     #[arg(long)]
@@ -45,7 +51,7 @@ struct Cli {
     #[arg(long)]
     copy: bool,
 
-    /// Recurse into sub-directories (class/uncertain output folders are skipped).
+    /// Recurse into sub-directories (class/unsure output folders are skipped).
     #[arg(long)]
     recursive: bool,
 
@@ -57,6 +63,14 @@ struct Cli {
     /// Force grayscale preprocessing (only for models trained on grayscale images).
     #[arg(long)]
     grayscale: bool,
+
+    /// Skip the check for a newer ml-runner release.
+    #[arg(long)]
+    no_update: bool,
+
+    /// Don't wait for Enter before exiting.
+    #[arg(long)]
+    no_pause: bool,
 }
 
 /// Everything we need to know about the loaded model, read from its ONNX metadata.
@@ -78,33 +92,42 @@ fn default_threshold() -> f32 {
         .unwrap_or(0.6)
 }
 
-/// Resolve the image folder: use the CLI argument if given, otherwise open a GUI folder
-/// picker. The picker (rfd) is compiled only on non-Linux targets (Windows/macOS), where
-/// the app is typically launched by double-click; on Linux the folder must be passed as an
-/// argument, which keeps GTK/Wayland system libraries out of the Linux build.
-#[cfg(not(target_os = "linux"))]
-fn resolve_input_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
-    match arg {
-        Some(p) => Ok(p),
-        None => rfd::FileDialog::new()
-            .set_title("Select image directory")
-            .pick_folder()
-            .context("No directory selected"),
+/// Resolve where the model comes from: a local `.onnx` file, a GitHub `Org/Repo` whose
+/// latest release is downloaded & cached, or (when `--model` is omitted) local discovery.
+fn resolve_model(spec: Option<&str>, input: &Path) -> Result<PathBuf> {
+    match spec {
+        None => discover_model(input),
+        Some(s) => {
+            let path = Path::new(s);
+            if path.is_file() {
+                Ok(path.to_path_buf())
+            } else if is_repo_slug(s) {
+                remote::ensure_model(s)
+            } else {
+                bail!(
+                    "--model must be a GitHub repo like `Org/Repo` or a path to an existing \
+                     .onnx file (got `{s}`)"
+                )
+            }
+        }
     }
 }
 
-#[cfg(target_os = "linux")]
-fn resolve_input_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
-    arg.context(
-        "No input folder given. On Linux, pass the image folder as an argument, e.g.:  localSort /path/to/images",
-    )
+/// True for a plain `owner/name` GitHub slug (exactly one `/`, allowed name characters).
+fn is_repo_slug(s: &str) -> bool {
+    let ok = |seg: &str| {
+        !seg.is_empty()
+            && seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    let mut parts = s.split('/');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(a), Some(b), None) if ok(a) && ok(b))
 }
 
 fn main() {
     let cli = Cli::parse();
-    // Launched without a folder argument (e.g. double-clicked) -> we open a GUI picker and
-    // must keep the console open at the end so the summary is readable before it closes.
-    let interactive = cli.input.is_none();
+    // Keep the console open at the end (handy when the .exe is launched from a file
+    // manager); `--no-pause` disables it for scripts/CI.
+    let pause = !cli.no_pause;
 
     let code = match run(cli) {
         Ok(()) => 0,
@@ -114,7 +137,7 @@ fn main() {
         }
     };
 
-    if interactive {
+    if pause {
         print!("\nPress Enter to exit...");
         let _ = io::stdout().flush();
         let mut buf = String::new();
@@ -124,6 +147,15 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // Self-update from this tool's own repo (non-fatal: never blocks the actual work).
+    if !cli.no_update {
+        match remote::self_update(TOOL_REPO) {
+            Ok(Some(v)) => println!("Updated ml-runner to {v} (restart to use the new version)."),
+            Ok(None) => {}
+            Err(e) => eprintln!("Update check skipped: {e}"),
+        }
+    }
+
     if let Some(thr) = cli.min_confidence {
         anyhow::ensure!(
             (0.0..=1.0).contains(&thr),
@@ -133,16 +165,11 @@ fn run(cli: Cli) -> Result<()> {
     // Build-time default, overridable at runtime with --min-confidence.
     let threshold = cli.min_confidence.unwrap_or_else(default_threshold);
 
-    let input = resolve_input_dir(cli.input.clone())?;
+    // Folder to sort: positional argument, or the current directory.
+    let input = cli.input.clone().unwrap_or_else(|| PathBuf::from("."));
     anyhow::ensure!(input.is_dir(), "Not a directory: {}", input.display());
 
-    let model_path = match &cli.model {
-        Some(p) => {
-            anyhow::ensure!(p.is_file(), "Model not found: {}", p.display());
-            p.clone()
-        }
-        None => discover_model(&input)?,
-    };
+    let model_path = resolve_model(cli.model.as_deref(), &input)?;
 
     let mut session = load_session(&model_path)?;
     let model = read_model_info(&session);

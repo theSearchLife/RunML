@@ -1,5 +1,5 @@
 [package]
-name = "localSort"
+name = "ml-runner"
 version = "0.1.0"
 edition = "2024"
 
@@ -11,8 +11,8 @@ ndarray = "0.17"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
 walkdir = "2"
 
-# GUI folder picker — only on platforms where the app is launched by double-click.
-# Excluded on Linux so the build needs no GTK/Wayland system libraries (on Linux the
-# image folder is passed as a CLI argument instead).
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-rfd = "0.15"
+# HTTP for GitHub releases (model download + self-update). rustls (ureq's default TLS)
+# keeps every platform free of OpenSSL and other system libraries.
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+self-replace = "1"

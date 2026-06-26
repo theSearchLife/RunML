@@ -38,11 +38,11 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
-            bin: localSort
+            bin: ml-runner
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-x86_64
-            bin: localSort.exe
+            bin: ml-runner.exe
     runs-on: ${{ matrix.os }}
     env:
       # Confidence threshold baked into the binary. Set repo variable
@@ -64,20 +64,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          dist="RunML-${{ needs.get-version.outputs.tag }}-${{ matrix.name }}"
-          mkdir "$dist"
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$dist/"
-          cp target/${{ matrix.target }}/release/libonnxruntime*.so* "$dist/" 2>/dev/null || true
-          tar -czf "$dist.tar.gz" "$dist"
-          echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
+          # ONNX Runtime is statically linked, so the binary is self-contained.
+          # Ship the raw binary; its name suffix is what self-update matches on.
+          asset="ml-runner-${{ needs.get-version.outputs.tag }}-${{ matrix.name }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$asset"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          # ONNX Runtime is statically linked, so the binary is self-contained:
-          # ship the raw .exe (double-click ready, no sidecar DLLs).
-          asset="RunML-${{ needs.get-version.outputs.tag }}-${{ matrix.name }}.exe"
+          # ONNX Runtime is statically linked, so the .exe is self-contained (no sidecar DLLs).
+          asset="ml-runner-${{ needs.get-version.outputs.tag }}-${{ matrix.name }}.exe"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$asset"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
 
