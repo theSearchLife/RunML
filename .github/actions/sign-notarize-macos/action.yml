@@ -1,0 +1,77 @@
+name: Sign and notarize a macOS binary
+description: codesign (Developer ID Application, hardened runtime) + notarize via the App Store Connect API.
+
+inputs:
+  binary:
+    description: Path to the macOS binary to sign in place.
+    required: true
+  certificate:
+    description: Developer ID Application certificate (.p12, base64).
+    required: true
+  certificate-password:
+    description: Password for the .p12 certificate.
+    required: true
+  signing-identity:
+    description: 'Developer ID Application: … identity string.'
+    required: true
+  keychain-password:
+    description: Password for the temporary CI keychain.
+    required: true
+  api-key:
+    description: App Store Connect API key (.p8 contents, raw or base64).
+    required: true
+  api-key-id:
+    description: App Store Connect API key ID.
+    required: true
+  api-issuer-id:
+    description: App Store Connect API issuer UUID.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        MACOS_CERTIFICATE: ${{ inputs.certificate }}
+        MACOS_CERTIFICATE_PWD: ${{ inputs.certificate-password }}
+        MACOS_SIGNING_IDENTITY: ${{ inputs.signing-identity }}
+        KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
+        APPLE_API_KEY: ${{ inputs.api-key }}
+        APPLE_API_KEY_ID: ${{ inputs.api-key-id }}
+        APPLE_API_ISSUER_ID: ${{ inputs.api-issuer-id }}
+        BINARY: ${{ inputs.binary }}
+      run: |
+        set -euo pipefail
+
+        # Import the Developer ID Application certificate into a temporary keychain.
+        echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+        security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+        security set-keychain-settings -lut 21600 build.keychain
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+        security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+        security list-keychains -d user -s build.keychain login.keychain
+        rm certificate.p12
+
+        # Sign with hardened runtime + secure timestamp (required for notarization).
+        codesign --force --options runtime --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$BINARY"
+        codesign --verify --strict --verbose=2 "$BINARY"
+
+        # The API key secret may be stored raw (PEM .p8) or base64-encoded — accept either.
+        printf '%s' "$APPLE_API_KEY" > api_key_in
+        if grep -q 'BEGIN PRIVATE KEY' api_key_in; then
+          mv api_key_in api_key.p8
+        else
+          base64 --decode < api_key_in > api_key.p8 || true
+        fi
+        if ! grep -q 'BEGIN PRIVATE KEY' api_key.p8; then
+          echo "::error::APPLE_API_KEY is not a valid .p8 key. Store the raw AuthKey_*.p8 contents (with line breaks), or its base64."
+          exit 1
+        fi
+
+        # Notarize the (zipped) binary, then wait. A bare executable can't be stapled;
+        # Gatekeeper verifies notarization online.
+        ditto -c -k "$BINARY" notarize.zip
+        xcrun notarytool submit notarize.zip \
+          --key api_key.p8 --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+        rm -f api_key_in api_key.p8 notarize.zip
