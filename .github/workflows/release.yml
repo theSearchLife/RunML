@@ -31,6 +31,8 @@ jobs:
 
   build:
     needs: get-version
+    # macOS signing/notarization is finicky; don't let it block the Linux/Windows release.
+    continue-on-error: ${{ contains(matrix.name, 'macos') }}
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +45,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             name: windows-x86_64
             bin: ml-runner.exe
+          - os: macos-13
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+            bin: ml-runner
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macos-arm64
+            bin: ml-runner
     runs-on: ${{ matrix.os }}
     env:
       # Confidence threshold baked into the binary. Set repo variable
@@ -60,6 +70,43 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Sign & notarize (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+
+          # Import the Developer ID Application certificate into a temporary keychain.
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          rm certificate.p12
+
+          # Sign with hardened runtime + secure timestamp (required for notarization).
+          codesign --force --options runtime --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+
+          # Notarize the (zipped) binary via the App Store Connect API key, then wait.
+          printf '%s' "$APPLE_API_KEY" > api_key.p8
+          ditto -c -k "$bin" notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --key api_key.p8 --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          rm -f api_key.p8 notarize.zip
+          # A bare executable can't be stapled; Gatekeeper verifies notarization online.
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -76,6 +123,15 @@ jobs:
         run: |
           # ONNX Runtime is statically linked, so the .exe is self-contained (no sidecar DLLs).
           asset="ml-runner-${{ needs.get-version.outputs.tag }}-${{ matrix.name }}.exe"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$asset"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # Self-contained, signed & notarized binary; raw asset so self-update can match it.
+          asset="ml-runner-${{ needs.get-version.outputs.tag }}-${{ matrix.name }}"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$asset"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
 
