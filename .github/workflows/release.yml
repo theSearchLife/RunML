@@ -100,11 +100,21 @@ jobs:
           codesign --verify --strict --verbose=2 "$bin"
 
           # Notarize the (zipped) binary via the App Store Connect API key, then wait.
-          printf '%s' "$APPLE_API_KEY" > api_key.p8
+          # The key secret may be stored raw (PEM .p8) or base64-encoded — accept either.
+          printf '%s' "$APPLE_API_KEY" > api_key_in
+          if grep -q 'BEGIN PRIVATE KEY' api_key_in; then
+            mv api_key_in api_key.p8
+          else
+            base64 --decode < api_key_in > api_key.p8 || true
+          fi
+          if ! grep -q 'BEGIN PRIVATE KEY' api_key.p8; then
+            echo "::error::APPLE_API_KEY is not a valid .p8 key. Store the raw AuthKey_*.p8 contents (with line breaks), or its base64, in the secret."
+            exit 1
+          fi
           ditto -c -k "$bin" notarize.zip
           xcrun notarytool submit notarize.zip \
             --key api_key.p8 --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
-          rm -f api_key.p8 notarize.zip
+          rm -f api_key_in api_key.p8 notarize.zip
           # A bare executable can't be stapled; Gatekeeper verifies notarization online.
 
       - name: Package (Linux)
