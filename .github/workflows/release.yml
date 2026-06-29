@@ -5,9 +5,8 @@ name: Release
 # pick a branch). Each release contains the self-contained per-platform executable
 # (ONNX Runtime is statically linked); the model.onnx is distributed separately.
 #
-# Linux, Windows and macOS-arm64 build fast and ship in the main release. Intel macOS
-# (macos-15-intel) is built in a separate job AFTER the release and attaches its asset,
-# so a slow/failed Intel build never blocks the release.
+# Builds Linux, Windows and macOS arm64. Intel macOS (x86_64) is NOT built: ort ships no
+# x86_64-apple-darwin ONNX Runtime prebuilt, and Apple has discontinued Intel Macs.
 on:
   push:
     branches: [main]
@@ -120,46 +119,3 @@ jobs:
           name: ${{ needs.get-version.outputs.tag }}
           generate_release_notes: true
           files: artifacts/**/*
-
-  # Intel macOS: built natively on an Intel runner AFTER the release exists, then its
-  # asset is attached. continue-on-error means a build failure or runner delay never
-  # blocks the main release (which already shipped without waiting for this).
-  # NOTE: macos-13 (Intel) was retired 2025-12-04; macos-15-intel is its replacement.
-  macos-intel:
-    needs: [get-version, release]
-    runs-on: macos-15-intel
-    continue-on-error: true
-    timeout-minutes: 40
-    env:
-      MANTA_CONFIDENCE_THRESHOLD: ${{ vars.MANTA_CONFIDENCE_THRESHOLD || '0.6' }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --release --target x86_64-apple-darwin
-
-      - name: Sign & notarize
-        uses: ./.github/actions/sign-notarize-macos
-        with:
-          binary: target/x86_64-apple-darwin/release/ml-runner
-          certificate: ${{ secrets.MACOS_CERTIFICATE }}
-          certificate-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-          signing-identity: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
-          api-key: ${{ secrets.APPLE_API_KEY }}
-          api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
-          api-issuer-id: ${{ secrets.APPLE_API_ISSUER_ID }}
-
-      - name: Attach to release
-        shell: bash
-        run: |
-          asset="ml-runner-${{ needs.get-version.outputs.tag }}-macos-x86_64"
-          cp target/x86_64-apple-darwin/release/ml-runner "$asset"
-          gh release upload "${{ needs.get-version.outputs.tag }}" "$asset" --clobber --repo "${{ github.repository }}"
