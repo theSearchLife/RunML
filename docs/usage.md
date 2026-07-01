@@ -63,22 +63,22 @@ folder names mirror the model's class names; a count summary prints at the end.
 
 ## Download
 
-Binaries are on the [latest release](https://github.com/theSearchLife/RunML/releases/latest)
-(Assets). Each is self-contained — ONNX Runtime is bundled in.
+Grab the asset for your OS from the
+[latest release](https://github.com/theSearchLife/RunML/releases/latest):
 
-| OS | Asset |
-|---|---|
-| Windows (x64) | `ml-runner-<version>-windows-x86_64.exe` |
-| macOS (Apple Silicon) | `ml-runner-<version>-macos-arm64` |
-| Linux (x64) | `ml-runner-<version>-linux-x86_64` |
+| OS | Asset | After download |
+|---|---|---|
+| Windows (x64) | `ml-runner_windows_amd64.zip` | unzip → `ml-runner.exe` |
+| Linux (x64) | `ml-runner_linux_amd64.tar.gz` | `tar -xzf …` → `ml-runner`, then `chmod +x ml-runner` |
+| macOS (Apple Silicon) | `ml-runner_macos_arm64.pkg` | open the installer → puts `ml-runner` in `/usr/local/bin` |
 
-Intel Macs are not supported. First run per OS:
+The binary is self-contained (ONNX Runtime bundled). Intel Macs aren't supported.
+
 - **Windows:** SmartScreen may warn → **More info → Run anyway**.
-- **macOS:** `chmod +x ./ml-runner-*`; it's signed & notarized. If a browser download is blocked: `xattr -d com.apple.quarantine ./ml-runner-*`.
-- **Linux:** `chmod +x ./ml-runner-*`.
-
-To run it as just `ml-runner`, put it on your PATH (Windows: `setx PATH "%PATH%;C:\folder"`;
-macOS/Linux: move it to `/usr/local/bin/ml-runner`).
+- **macOS:** the `.pkg` is signed & notarized; after installing, `ml-runner` is already on
+  your PATH (no `chmod`/quarantine steps needed).
+- **Linux/Windows:** to run it as just `ml-runner`, put the extracted binary on your PATH
+  (Windows: `setx PATH "%PATH%;C:\folder"`; Linux: `sudo mv ml-runner /usr/local/bin/`).
 
 ## The model
 
@@ -92,9 +92,10 @@ macOS/Linux: move it to `/usr/local/bin/ml-runner`).
 
 ## Auto-update
 
-On startup the tool checks `theSearchLife/RunML` for a newer release and, if found,
-downloads and replaces itself, then continues (the new version applies next run).
-`--no-update` skips the check.
+On startup the tool checks `theSearchLife/RunML` for a newer release. On **Windows/Linux** it
+downloads the new archive, replaces itself, and continues (the new version applies next run).
+On **macOS** it only prints a notice — the `.pkg` installer can't self-replace, so download
+the new `.pkg` to update. `--no-update` skips the check.
 
 ## GITHUB_TOKEN
 

@@ -74,11 +74,15 @@ distribution (`to_probabilities`).
 ## Self-update (`src/remote.rs`)
 
 On startup the tool checks its **own** repo (`const TOOL_REPO = "theSearchLife/RunML"`):
-`parse_version` compares the latest release tag against `env!("CARGO_PKG_VERSION")`. If newer,
-it downloads the asset whose name ends with this platform's suffix
-(`windows-x86_64.exe` / `linux-x86_64` / `macos-arm64`) and replaces the running executable
-via the `self-replace` crate, then continues (the new binary applies next run). All errors
-are non-fatal.
+`parse_version` compares the latest release tag against `env!("CARGO_PKG_VERSION")`. If newer:
+
+- **Windows/Linux** — download the release archive (`ml-runner_windows_amd64.zip` /
+  `ml-runner_linux_amd64.tar.gz`), extract the binary (`zip` / `flate2`+`tar`), and replace
+  the running executable via the `self-replace` crate.
+- **macOS** — the release is a `.pkg` installer, which can't be swapped in place, so it just
+  prints a notice pointing at the releases page (no silent self-update on macOS).
+
+All errors are non-fatal (treated as "update skipped").
 
 ## Confidence threshold
 
@@ -101,7 +105,8 @@ lift the 60 req/hour anonymous rate limit.
 | `image`, `ndarray` | decode/resize, tensor layout |
 | `ort` (`download-binaries`, `copy-dylibs`) | ONNX Runtime — statically linked |
 | `ureq` (rustls), `serde` | GitHub HTTP + JSON |
-| `self-replace` | in-place binary update |
+| `self-replace` | in-place binary update (Windows/Linux) |
+| `zip`, `tar`, `flate2` | extract the self-update archive (target-gated to non-macOS) |
 | `walkdir` | directory traversal |
 
 Everything is pure Rust + rustls, so no platform needs system libraries (no OpenSSL, no GTK).
@@ -115,26 +120,29 @@ MANTA_CONFIDENCE_THRESHOLD=0.7 cargo build --release   # bake a custom default t
 
 ## Release CI (`.github/workflows/release.yml`)
 
-- **Trigger:** push to `main` touching `Cargo.toml`, the workflow, or `.github/actions/**`;
-  or a manual `workflow_dispatch`.
+- **Trigger:** push to `main` touching `Cargo.toml` or the workflow; or `workflow_dispatch`.
 - **`get-version`** reads `version` from `Cargo.toml` → tag `v<version>`.
-- **`build`** (matrix) → `linux-x86_64` (ubuntu), `windows-x86_64` (windows),
-  `macos-arm64` (macos-14). macOS legs sign & notarize via the composite action;
-  macOS legs are `continue-on-error` and the job has a 30-min timeout so a macOS hiccup can't
-  block the release.
-- **`release`** downloads the artifacts and publishes a GitHub Release
-  (`softprops/action-gh-release`) whose assets are the raw per-platform binaries named
-  `ml-runner-<tag>-<platform>`.
+- **`build`** (matrix) → `x86_64-unknown-linux-gnu` (ubuntu), `x86_64-pc-windows-msvc`
+  (windows), `aarch64-apple-darwin` (macos-14). Each job packages its asset and uploads it;
+  the macOS leg is `continue-on-error` (30-min timeout) so a signing hiccup can't block the
+  Linux/Windows release.
+- **Packaging** — Linux → `ml-runner_linux_amd64.tar.gz`, Windows →
+  `ml-runner_windows_amd64.zip` (each holds the bare `ml-runner`/`ml-runner.exe`); macOS →
+  `ml-runner_macos_arm64.pkg` (a signed, notarized installer). Asset names carry no version —
+  the version lives in the release tag.
+- **`release`** downloads all artifacts and publishes a GitHub Release
+  (`softprops/action-gh-release`).
 
-### macOS signing
+### macOS packaging & signing
 
-The composite action imports the Developer ID Application certificate into a temporary
-keychain, `codesign`s the binary (hardened runtime + secure timestamp), and notarizes it via
-`xcrun notarytool` with an App Store Connect API key. Required repository **Secrets**:
-`MACOS_CERTIFICATE` (+`_PWD`), `MACOS_SIGNING_IDENTITY`, `KEYCHAIN_PASSWORD`, `APPLE_API_KEY`
-(+`_ID`, +`_ISSUER_ID`). The key secret may be raw PEM or base64 (the step handles both).
-The binary is shipped **raw** (not a `.pkg`) so self-update keeps working; a bare executable
-can't be stapled, so Gatekeeper verifies notarization online.
+The inline macOS steps import two certs into a temporary keychain, `codesign` the binary with
+**Developer ID Application** (hardened runtime + timestamp), build a `.pkg` with `pkgbuild`
+(install location `/usr/local/bin`) signed with **Developer ID Installer**, then notarize the
+`.pkg` (`xcrun notarytool --wait`) and `stapler staple` it (a `.pkg` can be stapled, so
+Gatekeeper verifies offline). Required repository **Secrets** (all 10 from the bundle):
+`MACOS_CERTIFICATE` (+`_PWD`), `MACOS_SIGNING_IDENTITY`, `MACOS_INSTALLER_CERTIFICATE`
+(+`_PWD`), `MACOS_INSTALLER_SIGNING_IDENTITY`, `KEYCHAIN_PASSWORD`, `APPLE_API_KEY` (+`_ID`,
++`_ISSUER_ID`). The API key secret may be raw PEM or base64 (handled).
 
 ### No Intel macOS
 
