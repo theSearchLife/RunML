@@ -126,16 +126,38 @@ pub fn ensure_model(repo: &str) -> Result<PathBuf> {
     }
 }
 
-/// The release-asset filename suffix identifying the build for the current platform.
-/// Mirrors the names produced by `.github/workflows/release.yml`.
-fn target_asset_suffix() -> Option<&'static str> {
-    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => "windows-x86_64.exe",
-        ("linux", "x86_64") => "linux-x86_64",
-        ("macos", "x86_64") => "macos-x86_64",
-        ("macos", "aarch64") => "macos-arm64",
-        _ => return None,
-    })
+/// Download a release archive and extract the single binary it holds into a temp file.
+/// Windows assets are `.zip`; Linux assets are `.tar.gz`. (Not used on macOS, which ships a
+/// `.pkg` installer and doesn't self-replace.)
+#[cfg(not(target_os = "macos"))]
+fn download_and_extract(url: &str, is_zip: bool) -> Result<PathBuf> {
+    use std::io::{copy, Cursor};
+    let bytes = download_bytes(url)?;
+    let dest = std::env::temp_dir().join(format!("ml-runner-update-{}", std::process::id()));
+    let mut out =
+        fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
+    if is_zip {
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("opening downloaded .zip")?;
+        let mut entry = zip.by_index(0).context("the .zip is empty")?;
+        copy(&mut entry, &mut out).context("extracting the binary from the .zip")?;
+    } else {
+        let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+        let mut archive = tar::Archive::new(decoder);
+        let mut entry = archive
+            .entries()
+            .context("reading the .tar.gz")?
+            .next()
+            .context("the .tar.gz is empty")?
+            .context("reading the .tar.gz entry")?;
+        copy(&mut entry, &mut out).context("extracting the binary from the .tar.gz")?;
+    }
+    drop(out);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755));
+    }
+    Ok(dest)
 }
 
 /// Parse a `vMAJOR.MINOR.PATCH` (or `MAJOR.MINOR`) tag into a comparable tuple.
@@ -160,25 +182,30 @@ pub fn self_update(repo: &str) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let suffix = target_asset_suffix()
-        .context("no self-update asset is published for this platform")?;
-    let asset = rel
-        .assets
-        .iter()
-        .find(|a| a.name.ends_with(suffix))
-        .with_context(|| {
-            format!("release {} has no asset matching `*{suffix}`", rel.tag_name)
-        })?;
-
-    let bytes = download_bytes(&asset.browser_download_url)?;
-    let tmp = std::env::temp_dir().join(format!("ml-runner-update-{}.tmp", rel.tag_name));
-    fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    #[cfg(unix)]
+    // macOS ships a `.pkg` installer, which can't be swapped in place — just notify.
+    #[cfg(target_os = "macos")]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
+        println!(
+            "A newer ml-runner ({}) is available — download it from https://github.com/{repo}/releases/latest",
+            rel.tag_name
+        );
+        Ok(None)
     }
-    self_replace::self_replace(&tmp).context("replacing the running executable")?;
-    let _ = fs::remove_file(&tmp);
-    Ok(Some(rel.tag_name))
+    // Windows/Linux: download the release archive, extract the binary, replace ourselves.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (suffix, is_zip) = match std::env::consts::OS {
+            "windows" => ("windows_amd64.zip", true),
+            _ => ("linux_amd64.tar.gz", false),
+        };
+        let asset = rel
+            .assets
+            .iter()
+            .find(|a| a.name.ends_with(suffix))
+            .with_context(|| format!("release {} has no `*{suffix}` asset", rel.tag_name))?;
+        let tmp = download_and_extract(&asset.browser_download_url, is_zip)?;
+        self_replace::self_replace(&tmp).context("replacing the running executable")?;
+        let _ = fs::remove_file(&tmp);
+        Ok(Some(rel.tag_name))
+    }
 }

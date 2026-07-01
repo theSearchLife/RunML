@@ -16,3 +16,10 @@ walkdir = "2"
 ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 self-replace = "1"
+
+# Archive extraction for self-update (Windows .zip, Linux .tar.gz). Not needed on macOS,
+# which installs via a signed .pkg and does not self-replace. All pure Rust (no system libs).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
