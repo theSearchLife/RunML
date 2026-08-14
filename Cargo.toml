@@ -10,6 +10,7 @@ image = "0.25"
 ndarray = "0.17"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
 walkdir = "2"
+num_cpus = "1"
 
 # HTTP for GitHub releases (model download + self-update). rustls (ureq's default TLS)
 # keeps every platform free of OpenSSL and other system libraries.

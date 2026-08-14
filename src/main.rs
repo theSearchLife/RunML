@@ -3,6 +3,8 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
+    thread,
 };
 
 use anyhow::{bail, Context, Result};
@@ -71,6 +73,11 @@ struct Cli {
     /// Don't wait for Enter before exiting.
     #[arg(long)]
     no_pause: bool,
+
+    /// Number of parallel workers (CPUs) to use. If omitted, you're prompted. Defaults to and
+    /// is capped at the machine's physical core count (extra hyperthreads add no speedup).
+    #[arg(long, value_name = "N")]
+    cpus: Option<usize>,
 }
 
 /// Everything we need to know about the loaded model, read from its ONNX metadata.
@@ -171,8 +178,9 @@ fn run(cli: Cli) -> Result<()> {
 
     let model_path = resolve_model(cli.model.as_deref(), &input)?;
 
-    let mut session = load_session(&model_path)?;
-    let model = read_model_info(&session);
+    // One probe session to read the model's metadata (class names, size, ...).
+    let probe = load_session(&model_path, 1)?;
+    let model = read_model_info(&probe);
 
     let mode = if cli.grayscale || model.channels == 1 {
         "grayscale"
@@ -187,7 +195,7 @@ fn run(cli: Cli) -> Result<()> {
     );
     println!("  confidence threshold: {threshold:.2}  (below -> {UNSURE_DIR}/)");
 
-    // Destination dirs (one per class, plus uncertain). Computed even in --dry-run so that
+    // Destination dirs (one per class, plus unsure). Computed even in --dry-run so that
     // already-sorted files are skipped and recursion never re-scans its own output.
     let mut dest_dirs: Vec<PathBuf> = model.class_names.iter().map(|c| input.join(c)).collect();
     dest_dirs.push(input.join(UNSURE_DIR));
@@ -213,50 +221,91 @@ fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Parallel workers, each with its own single-thread session (measured to scale far
+    // better than ONNX Runtime's per-inference threading, which barely helps this workload).
+    let cpus = resolve_cpus(cli.cpus);
+    println!("  workers: {cpus}\n");
+    let mut sessions: Vec<Session> = Vec::with_capacity(cpus);
+    sessions.push(probe);
+    for _ in 1..cpus {
+        sessions.push(load_session(&model_path, 1)?);
+    }
+
+    // Round-robin the files across workers.
+    let mut chunks: Vec<Vec<PathBuf>> = vec![Vec::new(); cpus];
+    for (i, f) in files.into_iter().enumerate() {
+        chunks[i % cpus].push(f);
+    }
+
+    // Shared across workers. `place_lock` serializes the (pick-unique-name + move) step so
+    // two workers can never grab the same destination filename.
+    let place_lock = Mutex::new(());
+    let model_ref = &model;
+    let input_ref = &input;
+    let place_ref = &place_lock;
+    let (grayscale, dry_run, copy) = (cli.grayscale, cli.dry_run, cli.copy);
+
+    let results: Vec<(HashMap<String, usize>, usize)> = thread::scope(|scope| {
+        let handles: Vec<_> = sessions
+            .into_iter()
+            .zip(chunks)
+            .map(|(mut session, chunk)| {
+                scope.spawn(move || {
+                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    let mut errors = 0usize;
+                    for path in &chunk {
+                        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let (idx, confidence) =
+                            match classify(&mut session, model_ref, path, grayscale) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("Classification error for {filename}: {e:#}");
+                                    errors += 1;
+                                    continue;
+                                }
+                            };
+                        let predicted = model_ref
+                            .class_names
+                            .get(idx)
+                            .cloned()
+                            .unwrap_or_else(|| format!("class_{idx}"));
+                        let label = if confidence < threshold {
+                            UNSURE_DIR.to_string()
+                        } else {
+                            predicted
+                        };
+                        println!("{filename}  ->  {label}  ({:.0}%)", confidence * 100.0);
+                        if !dry_run {
+                            let _guard = place_ref.lock().unwrap();
+                            let dest_dir = input_ref.join(&label);
+                            if let Err(e) = fs::create_dir_all(&dest_dir) {
+                                eprintln!("Failed to create {}: {e}", dest_dir.display());
+                                errors += 1;
+                                continue;
+                            }
+                            let dest = unique_path(&dest_dir, &filename);
+                            if let Err(e) = place_file(path, &dest, copy) {
+                                eprintln!("Failed to place {filename}: {e}");
+                                errors += 1;
+                                continue;
+                            }
+                        }
+                        *counts.entry(label).or_insert(0) += 1;
+                    }
+                    (counts, errors)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut errors = 0usize;
-
-    for path in &files {
-        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
-
-        let (idx, confidence) = match classify(&mut session, &model, path, cli.grayscale) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Classification error for {filename}: {e:#}");
-                errors += 1;
-                continue;
-            }
-        };
-
-        let predicted = model
-            .class_names
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| format!("class_{idx}"));
-        let label = if confidence < threshold {
-            UNSURE_DIR.to_string()
-        } else {
-            predicted.clone()
-        };
-
-        println!("{filename}  ->  {label}  ({:.0}%)", confidence * 100.0);
-
-        if !cli.dry_run {
-            let dest_dir = input.join(&label);
-            if let Err(e) = fs::create_dir_all(&dest_dir) {
-                eprintln!("Failed to create {}: {e}", dest_dir.display());
-                errors += 1;
-                continue;
-            }
-            let dest = unique_path(&dest_dir, &filename);
-            if let Err(e) = place_file(path, &dest, cli.copy) {
-                eprintln!("Failed to place {filename}: {e}");
-                errors += 1;
-                continue;
-            }
+    for (c, e) in results {
+        for (k, v) in c {
+            *counts.entry(k).or_insert(0) += v;
         }
-
-        *counts.entry(label).or_insert(0) += 1;
+        errors += e;
     }
 
     print_summary(&model, &counts, errors, &cli);
@@ -286,13 +335,35 @@ fn print_summary(
     }
 }
 
-fn load_session(model_path: &Path) -> Result<Session> {
+fn load_session(model_path: &Path, intra_threads: usize) -> Result<Session> {
     Session::builder()
         .map_err(|e| anyhow::anyhow!("SessionBuilder: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("OptLevel: {e}"))?
+        .with_intra_threads(intra_threads)
+        .map_err(|e| anyhow::anyhow!("IntraThreads: {e}"))?
         .commit_from_file(model_path)
         .map_err(|e| anyhow::anyhow!("Failed to load model {}: {e}", model_path.display()))
+}
+
+/// Number of parallel workers: the `--cpus` value, or an interactive prompt. Clamped to
+/// 1..=min(8, logical cores); the prompt's default is min(4, that cap).
+fn resolve_cpus(requested: Option<usize>) -> usize {
+    // Physical cores are the throughput ceiling for this workload — the extra hyperthreads
+    // (logical cores beyond physical) add no speedup (measured: they even regress slightly),
+    // so both the cap and the default are the physical core count.
+    let max = num_cpus::get_physical().max(1);
+    let n = match requested {
+        Some(n) => n,
+        None => {
+            print!("Number of CPUs to use (max: {max}, default: {max}): ");
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            let _ = io::stdin().read_line(&mut line);
+            line.trim().parse::<usize>().unwrap_or(max)
+        }
+    };
+    n.clamp(1, max)
 }
 
 /// Reads class names, image size, channel count and the input tensor name from the

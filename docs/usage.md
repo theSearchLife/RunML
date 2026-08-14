@@ -43,6 +43,7 @@ ml-runner.exe --model=theSearchLife/MantaWatch "C:\path\to\photos"
 | `--dry-run` | off | Classify and print counts only — nothing is moved or copied. |
 | `--copy` | off (files are moved) | Copy into the class folders instead of moving. |
 | `--recursive` | off | Recurse into sub-directories. |
+| `--cpus <N>` | all physical cores | Parallel workers — the main speed knob (~3x). Defaults to (and is capped at) the machine's **physical** core count; extra hyperthreads add no speedup. Prompted if omitted. |
 | `--grayscale` | off | Force grayscale preprocessing (grayscale-trained models only). |
 | `--no-update` | off | Skip the check for a newer ml-runner release. |
 | `--no-pause` | off | Don't wait for Enter before exiting (for scripts). |

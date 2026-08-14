@@ -29,11 +29,16 @@ linked**, so each release is one self-contained executable — no sidecar librar
 4. **Input dir** — the positional `IMAGES_DIR`, else the current directory.
 5. **Model** — `resolve_model`: a repo slug → download & cache; a local `.onnx` path → use it;
    omitted → `discover_model` searches next to the images / cwd / executable.
-6. **Load** — open the ONNX session (`ort`) and read metadata (`read_model_info`).
-7. **Sort** — walk the folder (`walkdir`, skipping the output subfolders); for each image:
-   preprocess → run → argmax → route to the class folder, or `unsure` if the top
-   probability is below the threshold → move (or `--copy`, or nothing on `--dry-run`).
-8. Print a per-folder count summary.
+6. **Model** — open a probe ONNX session (`ort`) and read metadata (`read_model_info`).
+7. **Workers** — `resolve_cpus` (the `--cpus` value, or an interactive prompt; clamped to
+   `1..=min(8, cores)`) decides the worker count; build one single-thread session per worker.
+8. **Sort (parallel)** — walk the folder (`walkdir`, skipping the output subfolders),
+   round-robin the files across workers (`thread::scope`). Each worker, per image:
+   preprocess → run → argmax → route to the class folder, or `unsure` if below the threshold
+   → move (or `--copy`, or nothing on `--dry-run`). A `Mutex` serializes only the
+   pick-unique-name-and-move step (so workers can't collide on a destination filename);
+   per-worker counts are merged at the end.
+9. Print a per-folder count summary.
 
 `main()` wraps `run()` so it can print a friendly error and (unless `--no-pause`) wait for
 Enter before exiting — handy when the exe is launched from a file manager.
@@ -58,7 +63,20 @@ class names**. The classify head applies softmax in-graph, so outputs are used d
 probabilities; a numerically-stable softmax is applied only if the output isn't already a
 distribution (`to_probabilities`).
 
-> The exported ONNX has a static `batch=1`, so images are processed one at a time.
+## Parallelism
+
+Throughput comes from **`--cpus` parallel workers, each with a single-thread session**, not
+from batched inference. Benchmarks on this CPU workload showed batched inference gives **no
+speedup** (~0.95x) while N workers scale near-linearly (~3x at 8 workers, ~2x at 4): the
+bottleneck is JPEG decode + preprocessing, which parallelizes across images but not within a
+single batched forward pass, and the model is small enough that ONNX Runtime's own intra-op
+threading barely helps. The model is exported with a dynamic batch axis, but the tool doesn't
+exploit it on CPU (batching would only pay off on a GPU, where inference dominates).
+
+Scaling saturates at the **physical** core count: a 16-logical / 8-physical machine peaked at
+8 workers (~17 img/s), with 12–16 workers slightly *slower* — the extra hyperthreads share the
+same execution units and memory bandwidth. So `--cpus` defaults to and is capped at
+`num_cpus::get_physical()`.
 
 ## Model distribution (`src/remote.rs`)
 
