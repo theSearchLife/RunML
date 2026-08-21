@@ -43,6 +43,7 @@ ml-runner.exe --model=theSearchLife/MantaWatch "C:\path\to\photos"
 | `--dry-run` | off | Classify and print counts only — nothing is moved or copied. |
 | `--copy` | off (files are moved) | Copy into the class folders instead of moving. |
 | `--recursive` | off | Recurse into sub-directories. |
+| `--unsort` | off | Undo a previous sort: move every image under `IMAGES_DIR` back up into it (needs no model), then prune empty sub-folders. Pair with `--dry-run` to preview. See [Re-running over the same images](#re-running-over-the-same-images). |
 | `--cpus <N>` | all physical cores | Parallel workers — the main speed knob (~3x). Defaults to (and is capped at) the machine's **physical** core count; extra hyperthreads add no speedup. Prompted if omitted. |
 | `--grayscale` | off | Force grayscale preprocessing (grayscale-trained models only). |
 | `--no-update` | off | Skip the check for a newer ml-runner release. |
@@ -61,6 +62,29 @@ folder names mirror the model's class names; a count summary prints at the end.
 ├── other_fish/
 └── unsure/      ← confidence below the threshold
 ```
+
+## Re-running over the same images
+
+A normal run **skips the tool's own output folders**, so pointing it back at an already-sorted
+folder finds nothing to do — by design, repeated runs never re-shuffle sorted images. To re-run
+the same set (e.g. to try a different model or threshold), first put the images back into one
+folder with `--unsort`:
+
+```bash
+# preview what would move (nothing is touched)
+ml-runner ./photos --unsort --dry-run
+# revert the sort, then re-sort with a different model
+ml-runner ./photos --unsort
+ml-runner ./photos --model=theSearchLife/MantaWatch
+```
+
+`--unsort` moves every image found under the folder back up into it — regardless of how the
+sub-folders are named, so it reverts a sort made by *any* model — renames on name clashes with
+the same ` (n)` scheme as sorting, and removes the now-empty sub-folders. It needs no model.
+
+> If your images are nested a level deeper (e.g. `photos/100GOPRO/<class>/…`), run `--unsort` on
+> each sub-folder (`ml-runner ./photos/100GOPRO --unsort`) rather than the parent — pointing it
+> at the parent flattens **all** images into the parent and merges same-named files.
 
 ## Download
 

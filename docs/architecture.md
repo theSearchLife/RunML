@@ -40,6 +40,12 @@ linked**, so each release is one self-contained executable — no sidecar librar
    per-worker counts are merged at the end.
 9. Print a per-folder count summary.
 
+**`--unsort` mode** short-circuits at step 4 — before any model work — calling `unsort_folder`:
+it moves every image found under `IMAGES_DIR` back up into it (model-agnostic, so it reverts a
+sort made by *any* model), renames collisions with the sort's ` (n)` scheme, and prunes the
+emptied sub-folders (`--dry-run` previews without touching anything). This lets the same images
+be re-run with a different model or threshold.
+
 `main()` wraps `run()` so it can print a friendly error and (unless `--no-pause`) wait for
 Enter before exiting — handy when the exe is launched from a file manager.
 

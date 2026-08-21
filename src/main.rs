@@ -53,6 +53,12 @@ struct Cli {
     #[arg(long)]
     copy: bool,
 
+    /// Undo a previous sort: move every image under the folder back up into it, so the tool can
+    /// re-run over the same images (e.g. with a different model). Needs no model; pair with
+    /// --dry-run to preview. Now-empty sub-folders are removed afterwards.
+    #[arg(long)]
+    unsort: bool,
+
     /// Recurse into sub-directories (class/unsure output folders are skipped).
     #[arg(long)]
     recursive: bool,
@@ -175,6 +181,12 @@ fn run(cli: Cli) -> Result<()> {
     // Folder to sort: positional argument, or the current directory.
     let input = cli.input.clone().unwrap_or_else(|| PathBuf::from("."));
     anyhow::ensure!(input.is_dir(), "Not a directory: {}", input.display());
+
+    // `--unsort` is a self-contained maintenance mode: it needs no model and simply reverts a
+    // previous sort so the same images can be re-run. Do it and return before any model work.
+    if cli.unsort {
+        return unsort_folder(&input, cli.dry_run);
+    }
 
     let model_path = resolve_model(cli.model.as_deref(), &input)?;
 
@@ -551,6 +563,130 @@ fn place_file(src: &Path, dst: &Path, copy: bool) -> std::io::Result<()> {
             }
         }
     }
+}
+
+/// Undo a previous sort: move every image inside `root`'s sub-folders back up into `root`.
+/// It is deliberately model-agnostic — it moves images out of *any* sub-folder, so it reverts a
+/// sort made by any model (class-folder names don't have to match the current one). Collisions
+/// get the same ` (n)` suffix as sorting; sub-folders left empty are pruned. With `dry_run` it
+/// reports what would move and changes nothing.
+fn unsort_folder(root: &Path, dry_run: bool) -> Result<()> {
+    // Every image strictly inside a sub-folder (root/<sub>/<file> and deeper). Images already
+    // sitting directly in `root` are left where they are.
+    let mut files: Vec<PathBuf> = WalkDir::new(root)
+        .min_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|e| e.into_path())
+        .filter(|p| p.is_file() && is_image(p))
+        .collect();
+    files.sort();
+
+    if files.is_empty() {
+        println!("Nothing to unsort: no images in sub-folders of {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} {} image(s) back into {}\n",
+        if dry_run { "Would move" } else { "Moving" },
+        files.len(),
+        root.display()
+    );
+
+    // Names already directly in `root` (files, and the sub-folders themselves) are off-limits;
+    // track claimed names as we go so the preview and the real move agree on collision renames.
+    let mut taken: std::collections::HashSet<String> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    let mut moved = 0usize;
+    let mut renamed = 0usize;
+    let mut errors = 0usize;
+    for src in &files {
+        let filename = src.file_name().unwrap().to_string_lossy().into_owned();
+        let name = claim_unique(&mut taken, &filename);
+        let collided = name != filename;
+        if dry_run {
+            println!("{}  ->  {name}", src.display());
+        } else if let Err(e) = place_file(src, &root.join(&name), false) {
+            eprintln!("Failed to move {}: {e}", src.display());
+            errors += 1;
+            continue;
+        } else {
+            moved += 1;
+        }
+        if collided {
+            renamed += 1;
+        }
+    }
+
+    let removed = if dry_run { 0 } else { remove_empty_subdirs(root) };
+
+    if dry_run {
+        println!("\n--- DRY RUN - nothing moved ---");
+        println!("  would move: {}", files.len());
+        if renamed > 0 {
+            println!("  would be renamed to avoid name collisions: {renamed}");
+        }
+    } else {
+        println!("\n--- Unsorted ---");
+        println!("  moved: {moved}");
+        if renamed > 0 {
+            println!("  renamed to avoid name collisions: {renamed}");
+        }
+        if removed > 0 {
+            println!("  empty folders removed: {removed}");
+        }
+        if errors > 0 {
+            println!("  errors: {errors}");
+        }
+    }
+    Ok(())
+}
+
+/// Reserve a unique filename within a set of already-taken names, appending ` (n)` before the
+/// extension on collision (same scheme as the sort's `unique_path`, but tracked in-memory so the
+/// dry-run preview predicts renames without touching the filesystem).
+fn claim_unique(taken: &mut std::collections::HashSet<String>, filename: &str) -> String {
+    if taken.insert(filename.to_string()) {
+        return filename.to_string();
+    }
+    let p = Path::new(filename);
+    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let mut n = 1;
+    loop {
+        let cand = format!("{stem} ({n}){ext}");
+        if taken.insert(cand.clone()) {
+            return cand;
+        }
+        n += 1;
+    }
+}
+
+/// Remove now-empty sub-directories of `root`, deepest first (so a parent can be pruned once its
+/// children are gone). Never touches `root` itself, and only removes directories that are empty.
+fn remove_empty_subdirs(root: &Path) -> usize {
+    let mut dirs: Vec<PathBuf> = WalkDir::new(root)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_dir())
+        .map(|e| e.into_path())
+        .collect();
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    let mut removed = 0usize;
+    for d in dirs {
+        let empty = fs::read_dir(&d).map(|mut it| it.next().is_none()).unwrap_or(false);
+        if empty && fs::remove_dir(&d).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Resize shorter edge to `target` (preserving aspect ratio), then center-crop `target`x`target`.
